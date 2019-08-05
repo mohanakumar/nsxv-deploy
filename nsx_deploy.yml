@@ -1,0 +1,619 @@
+- hosts: localhost
+  connection: local
+  vars_files:
+    - ./configuration_nsx.yml
+  tasks:
+
+    - name: get date
+      shell: date
+      register: current_date
+
+    - name: print date
+      debug:
+        msg: DEPLOYMENT START TIME "{{ current_date.stdout_lines[0] }}"
+
+    - name: get NSX ova file name
+      shell: >-
+        ls {{nsxmanOvaPath}} | grep {{nsxBuild}}.ova
+      register: nsxman_ova_file
+      failed_when:  >-
+        '{{nsxBuild}}.ova' not in nsxman_ova_file.stdout
+      tags: nsx_deploy_ova
+
+    - name: get ovftool file name
+      shell: >-
+        ls {{ovfBundlePath}} | grep {{ovftoolBuild}}-lin.x86_64.bundle
+      register: ovftool_file
+      failed_when:  >-
+        '{{ovftoolBuild}}-lin.x86_64.bundle' not in ovftool_file.stdout
+      tags: nsx_deploy_ova
+
+    - name: install ovftool
+      shell: >-
+        chmod +x {{ ovfBundlePath }}/{{ovftool_file.stdout }}
+      tags: nsx_deploy_ova
+
+    - name: install ovftool
+      shell: >-
+        {{ovfBundlePath}}/{{ovftool_file.stdout}} --required --eulas-agreed
+      tags: nsx_deploy_ova
+
+    - name: deploy nsx-man
+      nsx_deploy_ova:
+        ovftool_path: "{{ ovfToolPath }}"
+        datacenter: "{{ deployDataCenterName }}"
+        datastore: "{{ deployMgmtDatastoreName}}"
+        portgroup: "{{ deployMgmtPortGroup }}"
+        cluster: "{{ deployCluster }}"
+        vmname: "{{ deployVmName }}"
+        hostname: "{{ deployHostname }}"
+        dns_server: "{{ deployMgmtDnsServer }}"
+        dns_domain: "{{ deployMgmtDnsDomain }}"
+        ntp_server: "{{ deployNtpServers }}"
+        gateway: "{{ deployMgmtDefaultGateway }}"
+        ip_address: "{{ deployMgmtIpAddress }}"
+        netmask: "{{ deployMgmtNetmask }}"
+        admin_password: "{{ nsxCliPass }}"
+        enable_password: "{{ nsxEnPass }}"
+        path_to_ova: "{{ nsxmanOvaPath }}"
+        ova_file: "{{ nsxman_ova_file.stdout }}"
+        vcenter: "{{ deployVcIPAddress }}"
+        vcenter_user: "{{ deployVcUser }}"
+        vcenter_passwd: "{{ deployVcPassword }}"
+      register: deploy_nsx_man
+      tags: nsx_deploy_ova
+
+    - name: Register NSX Manager to vCenter
+      nsx_vc_registration:
+        nsxmanager_spec: "{{ nsxmanager_spec }}"
+        vcenter: "{{ vcIpAddress }}"
+        vcusername: "{{ vcUser }}"
+        vcpassword: "{{ vcPassword }}"
+        accept_all_certs: true
+      register: vc_registration
+      tags: nsx_vc_registration
+    
+    
+    - name: Connect NSX Manager to SSO
+      nsx_sso_registration:
+        state: present
+        nsxmanager_spec: "{{ nsxmanager_spec }}"
+        sso_lookupservice_url: 'lookupservice/sdk'
+        sso_lookupservice_port: 443
+        sso_lookupservice_server: "{{ vcSsoHostname }}"
+        sso_admin_username: "{{ vcSsoUser }}"
+        sso_admin_password: "{{ vcSsoPassword }}"
+        accept_all_certs: true
+      tags: nsx_vc_registration
+    
+    - name: Gather vCenter Cluster moid to deploy controllers
+      vcenter_gather_moids:
+        hostname: "{{ vcHostname }}"
+        username: "{{ vcUser }}"
+        password: "{{ vcPassword }}"
+        datacenter_name: "{{ nsxControllerDatacenter }}"
+        cluster_name: "{{ nsxControllerVcCluster }}"
+        validate_certs: False
+      register: vcenter_ctrl_cluster_moid
+      tags: nsx_controllers
+    
+    
+    - name: Gather Controller datastore moid for controller deployment
+      vcenter_gather_moids:
+        hostname: "{{ vcHostname }}"
+        username: "{{ vcUser }}"
+        password: "{{ vcPassword }}"
+        datacenter_name: "{{ nsxControllerDatacenter }}"
+        datastore_name: "{{ nsxControllerDatastore }}"
+        validate_certs: False
+      register: vcenter_mgmt_datastore_moid
+      tags: nsx_controllers
+    
+    
+    - name: Gather Controller portgroup moid
+      vcenter_gather_moids:
+        hostname: "{{ vcHostname }}"
+        username: "{{ vcUser }}"
+        password: "{{ vcPassword }}"
+        datacenter_name: "{{ nsxControllerDatacenter }}"
+        portgroup_name: "{{ nsxControllerPortGroup }}"
+        validate_certs: False
+      register: vcenter_mgmt_portgroup_moid
+      tags: nsx_controllers
+    
+    
+    - name: Create all IP Pools
+      nsx_ippool:
+        nsxmanager_spec: "{{ nsxmanager_spec }}"
+        state: present
+        name: "{{ item.name }}"
+        start_ip: "{{ item.start_ip }}"
+        end_ip: "{{ item.end_ip }}"
+        prefix_length: "{{ item.prefix_length }}"
+        gateway: "{{ item.gateway }}"
+        dns_server_1: "{{ item.dns_server_1 }}"
+        dns_server_2: "{{ item.dns_server_2 }}"
+      with_items: "{{ nsxIpPools }}"
+      register: ip_pools
+      tags: 
+        - nsx_controllers
+        - nsx_vxlan_prep
+    
+    - name: Ip Pool to id Mapping
+      copy:
+        content: >-
+          {{ "mapping:" }}
+          {% set ippool_id = [] -%}
+          {% for rs in ip_pools.results %}
+            {% set ignored = ippool_id.extend([{"poolName": rs.item.name, "poolId": rs.ippool_id }]) -%}
+          {%- endfor %}
+          {{ ippool_id | to_json}}
+        dest: /ipPoolToIdMapping
+      tags: 
+        - nsx_controllers
+        - nsx_vxlan_prep
+      
+    
+    - name: mapping
+      include_vars:
+        file: /ipPoolToIdMapping
+        name: mapping
+      tags: 
+        - nsx_controllers
+        - nsx_vxlan_prep
+    
+    - name: get controller_ip_pool_id from mapping
+      set_fact:
+        controller_ip_pool_id: "{{ item.poolId}}"
+      with_items: "{{ mapping.mapping }}"
+      when: "{{ item.poolName == nsxControllerIpPoolName }}"
+      tags: nsx_controllers
+    
+    
+    - name: Create NSX Controller cluster
+      nsx_controllers:
+          nsxmanager_spec: "{{ nsxmanager_spec }}"
+          state: present
+          deploytype: "{{ controllerDeployType }}"
+          syslog_server: "{{ controllerSyslogServer }}"
+          ippool_id: "{{ controller_ip_pool_id }}"
+          resourcepool_moid: "{{ vcenter_ctrl_cluster_moid.object_id }}"
+          datastore_moid: "{{ vcenter_mgmt_datastore_moid.object_id }}"
+          network_moid: "{{ vcenter_mgmt_portgroup_moid.object_id }}"
+          password: "{{ controllerPassword }}"
+      tags: nsx_controllers
+    
+    - name: Apply NSX License
+      vcenter_nsx_license:
+        vcenter: "{{ vcHostname }}"
+        vcenter_user: "{{ vcUser }}"
+        vcenter_passwd: "{{ vcPassword }}"
+        license_key: "{{ license_key }}"
+      when: license_key is defined
+      register: nsxlic
+      tags: nsx_license
+    
+    - name: Gather vCenter hostPrepCluster moids
+      vcenter_gather_moids:
+        hostname: "{{ vcHostname }}"
+        username: "{{ vcUser }}"
+        password: "{{ vcPassword }}"
+        datacenter_name: "{{ item.datacenter_name }}"
+        cluster_name: "{{ item.name }}"
+        validate_certs: False
+      with_items: "{{hostPrepClusters}}"
+      register: vcenter_cluster_moid
+      tags:
+        - nsx_vxlan_prep
+    
+    
+    - name: Install VIBs (prepare) on all hostPrepClusters
+      nsx_cluster_prep:
+        nsxmanager_spec: "{{ nsxmanager_spec }}"
+        state: present
+        cluster_moid: "{{ item }}"
+      register: cluster_prep_compute
+      with_items: "{{ vcenter_cluster_moid.results | json_query('[*].object_id')}}"
+      tags: nsx_vxlan_prep
+    
+    - name: Gather vCenter Transport DVS moids
+      vcenter_gather_moids:
+        hostname: "{{ vcHostname }}"
+        username: "{{ vcUser }}"
+        password: "{{ vcPassword }}"
+        datacenter_name: "{{ item.datacenter_name }}"
+        dvs_name: "{{ item.vtep_vds_name }}"
+        validate_certs: False
+      with_items: "{{ hostPrepClusters }}"
+      register: vcenter_dvs_moids
+      tags:
+        - nsx_vxlan_prep
+    
+    - name: populate name to moid mapping in hostPrepClusters
+      copy:
+        content: >-
+           {{ "clusterList:" }}
+           {% set data = [] -%}
+           {% for cluster in hostPrepClusters %}
+             {% set dvs_moid = [] -%}
+             {% set ippool_id = [] -%}
+             {% set cluster_moid = [] -%}
+             {% for dvs in vcenter_dvs_moids.results %}
+               {% set ignore = dvs_moid.extend([dvs.object_id]) if dvs.object_name == cluster.vtep_vds_name  -%}
+             {%- endfor %}
+             {% for cl in vcenter_cluster_moid.results %}
+               {% set ignore=cluster_moid.extend([cl.object_id]) if cl.object_name == cluster.name  -%}
+             {%- endfor %}
+             {% for pool in mapping.mapping %}
+               {% set ignore=ippool_id.extend([pool.poolId]) if pool.poolName == cluster.vtep_ip_pool -%}
+             {%- endfor %}
+             {% set out = data.extend([{
+               'dvsMoid': dvs_moid[0],
+               'datacenterName': cluster.datacenter_name,
+               'vmknicCount': cluster.vmknic_count,
+               'teamingPolicy': cluster.teaming_policy,
+               'clusterMoid': cluster_moid[0],
+               'vtepVlan': cluster.vtep_vlan,
+               'ipPoolId': ippool_id[0],
+               'clusterName': cluster.name
+             }]) -%}
+           {%- endfor %}
+           {{data | to_json }}
+        dest: /hostPrepData
+      tags: nsx_vxlan_prep
+    
+    - name: get from file
+      include_vars:
+        file: /hostPrepData
+        name: hostPrepClustersMoid
+      tags: nsx_vxlan_prep
+    
+    
+    - name: VXLAN Prep (configure VTEP) on all hostPrepClusters
+      nsx_vxlan_prep:
+        nsxmanager_spec: "{{ nsxmanager_spec }}"
+        state: present
+        cluster_moid: "{{ item.clusterMoid }}"
+        dvs_moid: "{{ item.dvsMoid }}"
+        ippool_id: "{{ item.ipPoolId }}"
+        vlan_id: "{{ item.vtepVlan }}"
+        vmknic_count: "{{ item.vmknicCount }}"
+        teaming: "{{ item.teamingPolicy }}"
+      with_items: "{{ hostPrepClustersMoid.clusterList}}"
+      register: vxlan_prep
+      tags: nsx_vxlan_prep
+    
+    
+    - name: Create Segment Id Pool
+      nsx_segment_id_pool:
+        nsxmanager_spec: "{{ nsxmanager_spec }}"
+        state: present
+        idpoolstart: "{{ segmentIdPoolStart }}"
+        idpoolend: "{{ segmentIdPoolEnd }}"
+        mcast_enabled: "{{ mcastEnabled }}"
+        mcastpoolstart: "{{ mcastAddrStart }}"
+        mcastpoolend: "{{ mcastAddrEnd }}"
+      register: segment_pool
+      tags: nsx_segment_pool
+    
+    
+    - name: populate name to cluster moids in transportZones
+      copy:
+        content: >-
+           {{ "tz_with_cluster_moids:" }}
+           {% set tzList = [] -%}
+           {% for tz in transportZones  %}
+             {% set clusterList = [] -%}
+             {% for tzcluster in tz.included_clusters %}
+               {% for cluster in hostPrepClustersMoid.clusterList %}
+                 {% set list = clusterList.extend([cluster.clusterMoid]) if cluster.clusterName == tzcluster -%}
+               {%- endfor %}
+             {%- endfor %}
+             {% set tzs = tzList.extend([{
+               'name': tz.name,
+               'control_plane_mode': tz.control_plane_mode,
+               'included_clusters_moid': clusterList,
+               'description': tz.description
+             }])-%}
+           {%- endfor %}
+           {{tzList | to_json }}
+        dest: /tzMoidData
+      tags: nsx_transport_zone
+    
+    - name: get from file
+      include_vars:
+        file: /tzMoidData
+        name: tz_moid
+      tags: nsx_transport_zone
+    
+    - name: Add a Transport Zone with the Cluters as members
+      nsx_transportzone:
+        nsxmanager_spec: "{{ nsxmanager_spec }}"
+        state: 'present'
+        name: "{{ item.name }}"
+        controlplanemode: "{{ item.control_plane_mode }}"
+        description: "{{ item.description }}"
+        cluster_moid_list: "{{ item.included_clusters_moid }}"
+      with_items: "{{ tz_moid.tz_with_cluster_moids }}"
+      register: transport_zone
+      tags: nsx_transport_zone
+
+    - name: deploy logical switches
+      nsx_logical_switch:
+        nsxmanager_spec: "{{ nsxmanager_spec}}"
+        state: present
+        transportzone: "{{ item.transportzone }}"
+        name: "{{ item.name }}"
+        description: "{{ item.description }}"
+        controlplanemode: "{{ item.control_plane_mode }}"
+      with_items: "{{ logicalSwitches }}"
+      tags: nsx_logical_switches
+
+    - name: Gather ESG cluster moids
+      vcenter_gather_moids:
+        hostname: "{{ vcHostname }}"
+        username: "{{ vcUser }}"
+        password: "{{ vcPassword }}"
+        datacenter_name: "{{ item.deploy_datacenter }}"
+        cluster_name: "{{ item.deploy_cluster }}"
+        validate_certs: False
+      with_items: "{{ nsxEsgs }}"
+      register: esg_clusters_moid
+      tags: deploy_esg
+
+    - name: Gather DLR cluster Moids
+      vcenter_gather_moids:
+        hostname: "{{ vcHostname }}"
+        username: "{{ vcUser }}"
+        password: "{{ vcPassword }}"
+        datacenter_name: "{{ item.deploy_datacenter }}"
+        cluster_name: "{{ item.deploy_cluster }}"
+        validate_certs: False
+      with_items: "{{ nsxDlrs }}"
+      register: dlr_clusters_moid
+      tags: deploy_dlr
+     
+    - name: Gather ESG Datastore moids
+      vcenter_gather_moids:
+        hostname: "{{ vcHostname }}"
+        username: "{{ vcUser }}"
+        password: "{{ vcPassword }}"
+        datacenter_name: "{{ item.deploy_datacenter }}"
+        datastore_name: "{{ item.deploy_datastore }}"
+        validate_certs: False
+      with_items: "{{ nsxEsgs }}"
+      register: esg_datastores_moid
+      tags: deploy_esg
+
+    - name: Gather DLR Datastore Moids
+      vcenter_gather_moids:
+        hostname: "{{ vcHostname }}"
+        username: "{{ vcUser }}"
+        password: "{{ vcPassword }}"
+        datacenter_name: "{{ item.deploy_datacenter }}"
+        datastore_name: "{{ item.deploy_datastore }}"
+        validate_certs: False
+      with_items: "{{ nsxDlrs }}"
+      register: dlr_datastores_moid
+      tags: deploy_dlr
+
+    - name: Gather vCenter esg interface portgroup moid
+      vcenter_gather_moids:
+        hostname: "{{ vcHostname }}"
+        username: "{{ vcUser }}"
+        password: "{{ vcPassword }}"
+        datacenter_name: "{{ item.1.deploy_datacenter }}"
+        portgroup_name: "{{ item.0.portgroup_id }}"
+        validate_certs: False
+      loop: >-
+        {{ nsxEsgs | json_query( '[*].interfaces.[*]') | flatten | product (nsxEsgs) | list }}
+      when:
+        - "{{ item.0 in (item.1 | json_query ( 'interfaces.[*]' ) | flatten ) }}"
+        - "{{ 'portgroup_id' in item.0 }}"
+      register: interface_portgroup_moid
+      tags: deploy_esg
+
+    - name: Gather vCenter dlr interface portgroup moid
+      vcenter_gather_moids:
+        hostname: "{{ vcHostname }}"
+        username: "{{ vcUser }}"
+        password: "{{ vcPassword }}"
+        datacenter_name: "{{ item.1.deploy_datacenter }}"
+        portgroup_name: "{{ item.0.portgroup_id }}"
+        validate_certs: False
+      loop: >-
+        {{ nsxDlrs | json_query( '[*].interfaces') | flatten | product (nsxDlrs) | list }}
+      when:
+        - "{{ item.0 in item.1.interfaces }}"
+        - "{{ 'portgroup_id' in item.0 }}"
+      register: dlrinterface_portgroup_moid
+      tags: deploy_dlr
+
+    - name: Gather vCenter dlr mgmtpg moid
+      vcenter_gather_moids:
+        hostname: "{{ vcHostname }}"
+        username: "{{ vcUser }}"
+        password: "{{ vcPassword }}"
+        datacenter_name: "{{ item.deploy_datacenter }}"
+        portgroup_name: "{{ item.mgmt_portgroup}}"
+        validate_certs: False
+      loop: >-
+        {{ nsxDlrs }}
+      register: dlr_mgmt_portgroup_moid
+      tags: deploy_dlr
+
+    - name: populate name to id mappings for dlrs
+      copy:
+        content: >-
+           {{ "nsxDlrs_with_ids:" }}
+           {% set dlrList = [] -%}
+           {% for dlr in nsxDlrs  %}
+             {% set clusterList = [] -%}
+             {% set datacenterList = [] -%}
+             {% set datastoreList = [] -%}
+             {% set ns =  namespace( interfaceList = []) -%}
+             {% set mgmtPortgroupList = [] -%}
+             {% for cluster in dlr_clusters_moid.results %}
+               {% set list = clusterList.extend([cluster.object_id]) if cluster.object_name == dlr.deploy_cluster -%}
+               {% set list = datacenterList.extend([cluster.datacenter_moid]) if cluster.object_name == dlr.deploy_cluster -%}
+             {%- endfor %}
+             {% for datastore in dlr_datastores_moid.results %}
+               {% set list = datastoreList.extend([datastore.object_id]) if datastore.object_name == dlr.deploy_datastore -%}
+             {%- endfor %}
+             {% for mgmt_pg in dlr_mgmt_portgroup_moid.results %}
+               {% set list = mgmtPortgroupList.extend([mgmt_pg.object_id]) if mgmt_pg.object_name == dlr.mgmt_portgroup -%}
+             {%- endfor %}
+             {% for i in dlr.interfaces %}
+               {% if 'portgroup_id' in i %}
+                 {% for pg in dlrinterface_portgroup_moid.results %}
+                   {% if 'object_name' in pg %}
+                     {% if pg.object_name == i.portgroup_id and dlr in pg.item %}
+                       {% set out = i.__setitem__('portgroup_id', pg.object_id) -%}
+                       {% set list =  ns.interfaceList.extend([i]) -%}
+                     {% endif %}
+                   {% endif %}
+                 {%- endfor %}
+               {% else %}
+                 {% set list =  ns.interfaceList.extend([i]) -%}
+               {% endif %}
+             {%- endfor %}
+             {% set list = dlrList.extend([{
+               "name": dlr.name,
+               "state": "present",
+               "description": dlr.description,
+               "resourcepool_moid": clusterList[0],
+               "datastore_moid": datastoreList[0],
+               "datacenter_moid": datacenterList[0],
+               "mgmt_portgroup_moid": mgmtPortgroupList[0],
+               "interfaces": ns.interfaceList,
+               "default_gateway": dlr.default_gateway,
+               "default_gateway_adminDistance": dlr.default_gateway_adminDistance,
+               "routes": dlr.routes,
+               "remote_access": dlr.ssh_access,
+               "username": dlr.username,
+               "password": dlr.password,
+               "firewall": dlr.enable_firewall,
+               "ha_enabled": dlr.ha_enabled
+             }])-%}
+           {%- endfor %}
+           {{dlrList | to_json}}
+        dest: /dlrListData
+      tags: deploy_dlr
+
+    - name: get from file
+      include_vars:
+        file: /dlrListData
+        name: dlrList
+      tags: deploy_dlr
+
+
+    - name: deploy DLRs
+      nsx_dlr:
+        nsxmanager_spec: "{{ nsxmanager_spec}}"
+        name: "{{ item.name }}"
+        state: present
+        description: "{{ item.description }}"
+        resourcepool_moid: "{{ item.resourcepool_moid }}"
+        mgmt_portgroup_moid: "{{ item.mgmt_portgroup_moid }}"
+        datastore_moid: "{{ item.datastore_moid }}"
+        datacenter_moid: "{{ item.datacenter_moid }}"
+        interfaces: "{{ item.interfaces }}"
+        default_gateway: "{{ item.default_gateway }}"
+        default_gateway_adminDistance: "{{ item.default_gateway_adminDistance }}"
+        routes: "{{ item.routes }}"
+        remote_access: "{{ item.remote_access }}"
+        username: "{{ item.username }}"
+        password: "{{ item.password }}"
+        ha_enabled: "{{ item.ha_enabled }}"
+      with_items: "{{ dlrList.nsxDlrs_with_ids }}"
+      tags: deploy_dlr
+
+    - name: populate name to id mappings for esgs
+      copy:
+        content: >-
+           {{ "nsxEsgs_with_ids:" }}
+           {% set esgList = [] -%}
+           {% for esg in nsxEsgs  %}
+             {% set clusterList = [] -%}
+             {% set datacenterList = [] -%}
+             {% set datastoreList = [] -%}
+             {% set ns =  namespace( interfaceList = {}) -%}
+             {% for cluster in esg_clusters_moid.results %}
+               {% set list = clusterList.extend([cluster.object_id]) if cluster.object_name == esg.deploy_cluster -%}
+               {% set list = datacenterList.extend([cluster.datacenter_moid]) if cluster.object_name == esg.deploy_cluster -%}
+             {%- endfor %}
+             {% for datastore in esg_datastores_moid.results %}
+               {% set list = datastoreList.extend([datastore.object_id]) if datastore.object_name == esg.deploy_datastore -%}
+             {%- endfor %}
+             {% for k, v in esg.interfaces.iteritems() %}
+               {% if 'portgroup_id' in v %}
+                 {% for pg in interface_portgroup_moid.results %}
+                   {% if 'object_name' in pg %}
+                     {% if pg.object_name == v.portgroup_id and esg in pg.item %}
+                       {% set out = v.__setitem__('portgroup_id', pg.object_id) -%}
+                       {% set list =  ns.interfaceList.__setitem__(k, v) -%}
+                     {% endif %}
+                   {% endif %} 
+                 {%- endfor %}
+               {% else %}
+                 {% set list =  ns.interfaceList.__setitem__(k, v) -%}
+               {% endif %}
+             {%- endfor %}
+             {% set list = esgList.extend([{
+               "name": esg.name,
+               "state": "present",
+               "description": esg.description,
+               "resourcepool_moid": clusterList[0],
+               "datastore_moid": datastoreList[0],
+               "datacenter_moid": datacenterList[0],
+               "interfaces": ns.interfaceList,
+               "default_gateway": esg.default_gateway,
+               "default_gateway_adminDistance": esg.default_gateway_adminDistance,
+               "routes": esg.routes,
+               "remote_access": esg.ssh_access,
+               "username": esg.username,
+               "password": esg.password,
+               "firewall": esg.enable_firewall,
+               "ha_enabled": esg.ha_enabled
+             }])-%}
+           {%- endfor %}
+           {{esgList | to_json }}
+        dest: /esgListData
+      tags: deploy_esg
+
+    - name: get from file
+      include_vars:
+        file: /esgListData
+        name: esgList
+      tags: deploy_esg
+
+    
+    - name: deploy ESGs
+      nsx_edge_router:
+        nsxmanager_spec: "{{ nsxmanager_spec}}"
+        name: "{{ item.name }}"
+        state: present
+        description: "{{ item.description }}"
+        resourcepool_moid: "{{ item.resourcepool_moid }}"
+        datastore_moid: "{{ item.datastore_moid }}"
+        datacenter_moid: "{{ item.datacenter_moid }}"
+        interfaces: "{{ item.interfaces }}"
+        default_gateway: "{{ item.default_gateway }}"
+        default_gateway_adminDistance: "{{ item.default_gateway_adminDistance }}"
+        routes: "{{ item.routes }}"
+        remote_access: "{{ item.remote_access }}"
+        username: "{{ item.username }}"
+        password: "{{ item.password }}"
+        firewall: "{{ item.firewall }}"
+        ha_enabled: "{{ item.ha_enabled }}"
+      with_items: "{{ esgList.nsxEsgs_with_ids }}"
+      tags: deploy_esg
+
+    - name: get date
+      shell: date
+      register: current_date
+
+    - name: print date
+      debug:
+        msg: DEPLOYMENT END TIME "{{ current_date.stdout_lines[0] }}"
+

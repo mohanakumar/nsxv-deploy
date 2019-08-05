@@ -1,0 +1,232 @@
+# Deploy vCenter section
+# the following section defines the vCenter / vSphere environment
+# were the NSX Manager OVA gets deployed. This can be a separate management vCenter,
+# or the same vCenter to which NSX Manager gets registered
+deployVcIPAddress: '192.168.0.130'
+deployVcUser: 'administrator@gsslabs.org'
+deployVcPassword: 'VMware123!'
+
+# with NSX 6.2.2 and later you need licnse in order to prepare the hosts
+# Uncomment the line below and provide valid license key, otherwise the deployment will fail before preparing the clusters
+license_key: XXXXX-XXXXX-XXXXX-XXXXX-XXXXX
+
+# NSX Manager OVA deployment parameters
+# this section holds all parameters needed to deploy the NSX Manager OVA like IP address, etc.
+deployMgmtPortGroup: 'MGMT_PG'
+deployDataCenterName: "NSX_LAB"
+deployCluster: 'Infra'
+deployMgmtDatastoreName: 'NFS_VOLUME'
+deployMgmtIpAddress: '192.168.0.132'
+deployMgmtDefaultGateway: '192.168.0.1'
+deployMgmtNetmask: '255.255.255.0'
+deployMgmtDnsServer: '192.168.0.10'
+deployMgmtDnsDomain: 'gsslabs.org'
+deployNtpServers: '192.168.0.10'
+deploySyslogServer: '192.168.0.10'
+deployVmName: 'nsxmgr'
+deployHostname: 'nsxmgr.gsslabs.org'
+nsxCliPass: 'VMware123!'
+nsxEnPass: 'VMware123!'
+
+nsxBuild: 13282012
+nsxmanOvaPath: '/nsx-bootstrap' # MOUNT THIS PATH WHEN DEPLOYING THE CONTAINER -v <host-path>:/nsx-bootstrap
+
+ovftoolBuild: '7948156'
+ovfBundlePath: '/nsx-bootstrap'  # MOUNT THIS PATH WHEN DEPLOYING THE CONTAINER -v <host-path>:/nsx-bootstrap
+ovfToolPath: '/usr/bin/'       # DO NOT CHANGE
+
+# Target 'register' vCenter section
+# the following section defines the vCenter / vSphere environment
+# to which NSX Manager will be registered to. This can be the same as deploy vCenter,
+# or a separate 'payload' vCenter
+vcHostname: "vc130.gsslabs.org"
+vcIpAddress: "192.168.0.130"
+vcUser: "administrator@gsslabs.org"
+vcPassword: "VMware123!"
+vcSsoHostname: "vc130.gsslabs.org"
+vcSsoUser: "administrator@gsslabs.org"
+vcSsoPassword: "VMware123!"
+
+# NSX Manager credentials and RAML file path
+nsxmanager_spec:
+  raml_file: '/nsxraml/nsxvapi.raml'
+  host: "192.168.0.132"
+  user: 'admin'
+  password: "VMware123!"
+
+# NSX configuration details
+# including controller deployment environment details and IP Pools
+nsxControllerPortGroup: 'MGMT_PG'
+nsxControllerDatastore: 'NFS_VOLUME'
+nsxControllerVcCluster: 'Infra'
+nsxControllerDatacenter: 'NSX_LAB'
+nsxControllerIpPoolName: 'ctrl'
+controllerDeployType: 'lab'
+controllerPassword: 'VMware1!VMware1!'
+controllerSyslogServer: '192.168.0.10'
+
+# The following ip pools will be created. For example, vtep pool for host prep, controller ip pool for controller deployment. You can define more ip pools if needed.
+nsxIpPools:
+  - name: 'ctrl'
+    start_ip: '192.168.0.201'
+    end_ip: '192.168.0.203'
+    prefix_length: '24'
+    gateway: '192.168.0.1'
+    dns_server_1: '192.168.0.10'
+    dns_server_2: ''
+  - name: 'vteps'
+    start_ip: '192.168.3.100'
+    end_ip: '192.168.3.200'
+    prefix_length: '24'
+    gateway: '192.168.3.1'
+    dns_server_1: '192.168.3.10'
+    dns_server_2: ''
+
+# ID Pool for VXLAN
+segmentIdPoolStart: '5000'
+segmentIdPoolEnd: '10000'
+mcastEnabled: 'False'
+mcastAddrStart: '239.0.0.0'
+mcastAddrEnd: '239.255.255.255'
+
+
+# the following section defines which clusters in the target vCenter should
+# be prepared for NSX (VIB deployment)
+hostPrepClusters:
+  - name: 'Infra'
+    datacenter_name: 'NSX_LAB'
+    vtep_vds_name: 'DSwitch'
+    vmknic_count: 2
+    teaming_policy: LOADBALANCE_SRCID
+    vtep_vlan: '0'
+    vtep_ip_pool: 'vteps'
+  - name: 'Compute'
+    datacenter_name: 'NSX_LAB'
+    vtep_vds_name: 'DSwitch'
+    vmknic_count: 2
+    teaming_policy: LOADBALANCE_SRCID
+    vtep_vlan: '0'
+    vtep_ip_pool: 'vteps'
+
+# The following transportzones will be created in the nsx deployment
+
+transportZones:
+  - name: 'TZ1'
+    description: 'Default TZ'
+    control_plane_mode: 'UNICAST_MODE'
+    included_clusters: ['Compute']
+  - name: 'TZ2'
+    description: 'Default TZ'
+    control_plane_mode: 'UNICAST_MODE'
+    included_clusters: ['Compute', 'Infra']
+
+# The following logical-switches will be created in the nsx deployment. 
+
+logicalSwitches:
+  - name: 'vm-logicalswitch-1'
+    description: 'default desc'
+    control_plane_mode: "UNICAST_MODE"
+    transportzone: "TZ1"
+  - name: 'transit-logicalswitch-1'
+    description: 'default desc'
+    control_plane_mode: "UNICAST_MODE"
+    transportzone: "TZ1"
+  - name: 'vm-logicalswitch-2'
+    description: 'default desc'
+    control_plane_mode: "UNICAST_MODE"
+    transportzone: "TZ1"
+  - name: 'transit-logicalswitch-2'
+    description: 'default desc'
+    control_plane_mode: "UNICAST_MODE"
+    transportzone: "TZ1"
+
+# The following DLRs will be created in the nsx deployment. The portgroups used here must be existing in VC, if logical-switches are used, define them in logicalSwitches section.
+ 
+nsxDlrs:
+  - name: 'dlr1'
+    description: 'test desc'
+    deploy_cluster: 'Compute'
+    deploy_datastore: 'NFS_VOLUME'
+    deploy_datacenter: 'NSX_LAB'
+    mgmt_portgroup: 'MGMT_PG'
+    interfaces:
+      - { name: 'vm iface', ip: '10.0.0.1', prefix_len: 24, logical_switch: 'vm-logicalswitch-1', iftype: 'internal' }
+      - { name: 'transit iface', ip: '10.0.1.1', prefix_len: 24, logical_switch: 'transit-logicalswitch-1', iftype: 'uplink' } 
+      - { name: 'test', ip: '1.1.1.1', prefix_len: 24, portgroup_id: 'DPortGroup 2', iftype: 'uplink' }
+    routes: 
+      - { network: '10.0.10.0/24', next_hop: '10.0.1.2', admin_distance: '1', mtu: 1500, description: 'route to dlr2 network'}
+      - { network: '10.0.11.0/24', next_hop: '10.0.1.2' }
+    default_gateway: '10.0.1.2'
+    ssh_access: 'true'
+    username: 'admin'
+    password: 'VMware1!VMware1!'
+    default_gateway_adminDistance: 5
+    enable_firewall: 'true'
+    ha_enabled: 'true'
+  - name: 'dlr2'
+    description: 'test desc'
+    deploy_cluster: 'Compute'
+    deploy_datastore: 'NFS_VOLUME'
+    deploy_datacenter: 'NSX_LAB'
+    mgmt_portgroup: 'MGMT_PG'
+    interfaces:
+      - { name: 'vm iface', ip: '10.0.10.1', prefix_len: 24, logical_switch: 'vm-logicalswitch-2', iftype: 'internal' }
+      - { name: 'transit iface', ip: '10.0.11.1', prefix_len: 24, logical_switch: 'transit-logicalswitch-2', iftype: 'uplink' }
+      - { name: 'test', ip: '1.1.1.2', prefix_len: 24, portgroup_id: 'DPortGroup', iftype: 'uplink' }
+    routes:
+      - { network: '10.0.0.0/24', next_hop: '10.0.11.2', admin_distance: '1', mtu: 1500, description: 'route to dlr1 network'}
+      - { network: '10.0.1.0/24', next_hop: '10.0.11.2' }
+    default_gateway: '10.0.11.2'
+    default_gateway_adminDistance: 5
+    ssh_access: 'true'
+    username: 'admin'
+    password: 'VMware1!VMware1!'
+    enable_firewall: 'true'
+    ha_enabled: 'true'
+
+# The following ESGs will be created in the nsx deployment. The portgroups used here must be existing in VC, if logical-switches are used, define them in logicalSwitches section
+
+nsxEsgs:
+  - name: 'esg1'
+    description: 'test desc'
+    deploy_cluster: 'Compute'
+    deploy_datastore: 'NFS_VOLUME'
+    deploy_datacenter: 'NSX_LAB'
+    mgmt_portgroup: 'MGMT_PG'
+    interfaces:
+      vnic2: {ip: '10.0.11.2', prefix_len: 24, logical_switch: "transit-logicalswitch-2", name: 'transit-ls2', iftype: 'uplink', fence_param: 'ethernet0.filter1.param1=1'}
+      vnic1: {ip: '10.0.1.2', prefix_len: 24, logical_switch: "transit-logicalswitch-1", name: 'transit-ls1', iftype: 'uplink', fence_param: 'ethernet0.filter1.param1=1'}
+      vnic1: {ip: '192.168.0.199', prefix_len: 24, portgroup_id: "MGMT_PG", name: 'Uplink vnic', iftype: 'uplink', fence_param: 'ethernet0.filter1.param1=1'}
+    default_gateway: 192.168.0.1
+    default_gateway_adminDistance: 5
+    routes:
+      - { network: '10.0.0.0/24', next_hop: '10.0.1.1', admin_distance: '1', mtu: 1500, description: 'route to dlr1 network'}
+      - { network: '10.0.10.0/24', next_hop: '10.0.11.1' }
+    ssh_access: 'true'
+    username: 'admin'
+    password: 'VMware1!VMware1!'
+    enable_firewall: 'false'
+    ha_enabled: 'true'
+  - name: 'esg2'
+    description: 'test desc'
+    deploy_cluster: 'Compute'
+    deploy_datastore: 'NFS_VOLUME'
+    deploy_datacenter: 'NSX_LAB'
+    mgmt_portgroup: 'MGMT_PG'
+    interfaces:
+      vnic2: {ip: '10.0.11.3', prefix_len: 24, logical_switch: "transit-logicalswitch-2", name: 'transit-ls2', iftype: 'uplink', fence_param: 'ethernet0.filter1.param1=1'}
+      vnic1: {ip: '10.0.1.3', prefix_len: 24, logical_switch: "transit-logicalswitch-1", name: 'transit-ls1', iftype: 'uplink', fence_param: 'ethernet0.filter1.param1=1'}
+      vnic0: {ip: '192.168.0.198', prefix_len: 24, portgroup_id: "MGMT_PG", name: 'Uplink vnic', iftype: 'uplink', fence_param: 'ethernet0.filter1.param1=1'}
+    default_gateway: 192.168.0.1
+    default_gateway_adminDistance: 5
+    routes:
+      - { network: '10.0.0.0/24', next_hop: '10.0.1.1', admin_distance: '1', mtu: 1500, description: 'route to dlr1 network'}
+      - { network: '10.0.10.0/24', next_hop: '10.0.11.1' }
+    ssh_access: 'true'
+    username: 'admin'
+    password: 'VMware1!VMware1!'
+    enable_firewall: 'false'
+    ha_enabled: 'true'
+
+
+
